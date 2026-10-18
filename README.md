@@ -51,6 +51,8 @@ It detects the language on its own and handles people switching languages mid-se
 
 It answers out loud in the language you speak, and it works by actually reading and editing your files. Every tool call shows in the panel as it happens.
 
+**Every change is a version.** Each edit the assistant makes, down to a single word, is saved as its own version, and so are your own edits, each recording and anything changed outside Parrot. Open **History** (or press `H`) on any note to see a timeline of who changed what, with a word-by-word diff. Click **Restore this version** to make any version current again. Restoring never deletes anything; it becomes a new version, so you can always go back. You can also just tell the assistant: “undo what you just changed.”
+
 ## How it works
 
 ```
@@ -63,7 +65,8 @@ It answers out loud in the language you speak, and it works by actually reading 
 
 - **One binary.** `parrot` is a Rust program with the web app built in. It serves the UI on `127.0.0.1` only and relays audio to Gemini over WebSockets. Your API key never reaches the browser.
 - **Plain files.** Topics are folders and notes are Markdown, so you can open the notebook in Finder, VS Code or Obsidian. Parrot watches the folder, so edits from anywhere show up live.
-- **Safe tools.** The assistant can list, read, search, create, edit, append, rename, move and delete notes. It can also do bulk find-and-replace across notes (the `sed -i` use case, with a dry-run preview) and run read-only shell pipelines such as `grep -ri pune . | wc -l`. Everything is locked to the notebook folder: no paths outside it, no redirection, no arbitrary programs, and deletes go to the trash.
+- **Versions.** History lives in `.history/` inside the notebook, mirroring its folders, so it follows notes through renames, moves, deletes and undo.
+- **Safe tools.** The assistant can list, read, search, create, edit, append, rename, move and delete notes, and list or restore versions. It can also do bulk find-and-replace across notes (the `sed -i` use case, with a dry-run preview) and run read-only shell pipelines such as `grep -ri pune . | wc -l`. Everything is locked to the notebook folder: no paths outside it, no redirection, no arbitrary programs, and deletes go to the trash.
 - **Locked to localhost.** The server answers only requests that name `localhost` as the host and come from its own page, so other websites can't drive it (no DNS rebinding or CSRF).
 
 ## Commands
@@ -90,6 +93,7 @@ While it runs, the terminal shows a live dashboard: press `o` to open the browse
 | `⌘J` / `Ctrl+J` | Show or hide the assistant |
 | `⌘\` / `Ctrl+\` | Show or hide the sidebar |
 | `E` | Edit the open note (`Esc` to finish) |
+| `H` | Show the note's version history |
 | `↑ ↓ ← →`, `Enter`, `F2`, `Delete` | Move through the topic tree, open, rename, delete |
 
 ## Limits and costs
