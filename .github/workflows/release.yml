@@ -52,6 +52,9 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y musl-tools
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Smoke test
+        # Every target runs on its runner (x86_64 macOS through Rosetta).
+        run: target/${{ matrix.target }}/release/parrot --version
       - name: Package
         run: |
           cp target/${{ matrix.target }}/release/parrot ${{ matrix.asset }}
