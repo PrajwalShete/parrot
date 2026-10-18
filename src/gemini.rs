@@ -15,7 +15,6 @@ pub const TRANSCRIBE_MODEL: &str = "gemini-3.5-transcribe-live";
 pub const VOICE_MODEL: &str = "gemini-3.8-live";
 pub const AI_STUDIO_KEYS: &str = "https://aistudio.google.com/app/apikey";
 
-const HOST: &str = "generativelanguage.googleapis.com";
 const API: &str = "https://generativelanguage.googleapis.com/v1beta";
 const LIVE: &str = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
 
@@ -89,8 +88,10 @@ pub async fn connect(key: &str, setup: &Value) -> Result<(Sink, Stream)> {
     let mut request = LIVE.into_client_request()?;
     let key = HeaderValue::from_str(key.trim()).context("the API key has characters a key can't have")?;
     request.headers_mut().insert("x-goog-api-key", key);
+    let host = request.uri().host().context("no host in the Live URL")?.to_string();
+    let port = request.uri().port_u16().unwrap_or(443);
     let (ws, _) = tokio::time::timeout(Duration::from_secs(15), async {
-        let tcp = connect_tcp(HOST, 443).await?;
+        let tcp = connect_tcp(&host, port).await?;
         anyhow::Ok(client_async_tls(request, tcp).await?)
     })
     .await
@@ -137,7 +138,8 @@ async fn race(addrs: Vec<SocketAddr>) -> std::io::Result<TcpStream> {
         tokio::select! {
             Some(result) = attempts.next() => match result {
                 Ok(tcp) => {
-                    tcp.set_nodelay(true)?;
+                    // Only an optimisation: never give up a working connection over it.
+                    let _ = tcp.set_nodelay(true);
                     return Ok(tcp);
                 }
                 Err(e) => last_err = Some(e),
