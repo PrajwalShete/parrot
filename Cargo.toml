@@ -29,7 +29,8 @@ serde_json = "1.0.154"
 similar = "3.2.0"
 tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros", "time", "sync", "signal", "fs", "io-util", "process", "net"] }
 tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
-ureq = { version = "3.4.2", features = ["json"] }
+# Pinned: src/gemini.rs uses ureq::unversioned (resolver), which can change in any release.
+ureq = { version = "=3.4.2", features = ["json"] }
 walkdir = "2.5.0"
 
 [dev-dependencies]
