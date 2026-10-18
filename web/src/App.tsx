@@ -628,6 +628,8 @@ export default function App() {
             onReview={(path) => {
               go({ kind: "note", path });
               setHistory(true);
+              // On narrow windows the assistant covers the page; get it out of the way.
+              if (window.innerWidth <= MEDIUM) setAssistantOpen(false);
             }}
           />
           <div className="scrim scrim-right" onClick={() => setAssistantOpen(false)} aria-hidden />
