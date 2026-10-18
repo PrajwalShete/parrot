@@ -5,6 +5,7 @@
 //! rewrite many notes at once but can't run arbitrary programs or write outside the folder.
 //! `run_command` covers the read-only Unix tools (grep, wc, sort, find, ...) with pipes.
 
+use crate::history::{Author, Change};
 use crate::store::{Kind, Node, Store, StoreError};
 use anyhow::{Result, anyhow, bail};
 use regex::{Regex, RegexBuilder};
@@ -118,6 +119,16 @@ pub fn declarations() -> Value {
             "parameters": obj(json!({ "path": s("Note path ending in .md"), "content": s("Full new content") }), &["path", "content"])
         },
         {
+            "name": "list_versions",
+            "description": "Lists a note's saved versions, newest first: when, who made each change (you, the assistant, a recording) and what changed. Every edit is kept, so you can undo.",
+            "parameters": obj(json!({ "path": s("Note path"), "limit": n("How many to list (default 15)") }), &["path"])
+        },
+        {
+            "name": "restore_version",
+            "description": "Makes an earlier version of a note current again (to undo changes). Nothing is lost: the current text stays in the history. Use list_versions first to find the version_id, and confirm with the user.",
+            "parameters": obj(json!({ "path": s("Note path"), "version_id": s("The id from list_versions") }), &["path", "version_id"])
+        },
+        {
             "name": "replace_in_notes",
             "description": "Find and replace across many notes at once, like sed -i. Use dry_run first to see what would change. Regex replacements can use $1, $2 for groups.",
             "parameters": obj(json!({
@@ -187,6 +198,8 @@ fn label(name: &str) -> &str {
         "append_to_note" => "Appending",
         "write_note" => "Writing",
         "replace_in_notes" => "Replacing",
+        "list_versions" => "Looking at the history",
+        "restore_version" => "Restoring a version",
         "create_topic" => "Creating a topic",
         "rename_item" => "Renaming",
         "move_item" => "Moving",
@@ -289,7 +302,7 @@ fn run(store: &Store, view: &View, name: &str, args: &Value) -> Result<Outcome> 
         }
         "create_note" => {
             let topic = args.get("topic").and_then(Value::as_str).unwrap_or("");
-            let path = store.create_note(topic, arg(args, "title")?, arg(args, "content")?)?;
+            let path = store.create_note(topic, arg(args, "title")?, arg(args, "content")?, Author::Assistant)?;
             Outcome::ok(format!("Created {path}"), json!({ "path": path })).changed([path])
         }
         "edit_note" => {
@@ -311,8 +324,13 @@ fn run(store: &Store, view: &View, name: &str, args: &Value) -> Result<Outcome> 
             } else {
                 doc.content.replacen(find, replace, 1)
             };
-            store.write(&path, &content, Some(doc.modified))?;
             let n = if all { count } else { 1 };
+            let summary = format!(
+                "{}{}",
+                describe_replace(find, replace),
+                if n > 1 { format!(" ({n} places)") } else { String::new() }
+            );
+            store.write(&path, &content, Some(doc.modified), Change::new(Author::Assistant, &summary))?;
             Outcome::ok(format!("Edited {path}"), format!("Replaced {n} occurrence(s)")).changed([path])
         }
         "append_to_note" => {
@@ -326,13 +344,49 @@ fn run(store: &Store, view: &View, name: &str, args: &Value) -> Result<Outcome> 
             } else {
                 "\n\n"
             };
-            store.append(&path, &format!("{sep}{}\n", text.trim_matches('\n').trim_end()))?;
+            let added = text.trim_matches('\n').trim_end();
+            let content = format!("{}{sep}{added}\n", doc.content);
+            let summary = format!("Added “{}”", short(added.lines().next().unwrap_or("")));
+            store.write(&path, &content, Some(doc.modified), Change::new(Author::Assistant, &summary))?;
             Outcome::ok(format!("Added to {path}"), "Appended").changed([path])
         }
         "write_note" => {
             let path = note_path(store, arg(args, "path")?);
-            let doc = store.write(&path, arg(args, "content")?, None)?;
+            let doc = store.write(
+                &path,
+                arg(args, "content")?,
+                None,
+                Change::new(Author::Assistant, "Rewrote the note"),
+            )?;
             Outcome::ok(format!("Wrote {}", doc.path), "Saved").changed([doc.path])
+        }
+        "list_versions" => {
+            let path = note_path(store, arg(args, "path")?);
+            let versions = store.versions(&path)?;
+            let list: Vec<Value> = versions
+                .iter()
+                .take(num(args, "limit").unwrap_or(15).clamp(1, 100))
+                .map(|v| {
+                    let when = chrono::DateTime::from_timestamp_millis(v.created)
+                        .map(|t| t.with_timezone(&chrono::Local).format("%a %-d %b %H:%M:%S").to_string())
+                        .unwrap_or_default();
+                    json!({ "id": v.id, "when": when, "by": v.author, "what": v.summary, "lines_added": v.added, "lines_removed": v.removed })
+                })
+                .collect();
+            Outcome::ok(
+                format!("Looked at the history of {path}"),
+                json!({ "path": path, "newest_first": list, "total": versions.len() }),
+            )
+        }
+        "restore_version" => {
+            let path = note_path(store, arg(args, "path")?);
+            let id = arg(args, "version_id")?;
+            let doc = store.restore_version(&path, id, Author::Assistant)?;
+            Outcome::ok(
+                format!("Restored an earlier version of {}", doc.path),
+                "Restored; the previous text is still in the history.",
+            )
+            .changed([doc.path])
         }
         "replace_in_notes" => {
             let (pat, replacement) = (arg(args, "pattern")?, arg(args, "replacement")?);
@@ -358,7 +412,8 @@ fn run(store: &Store, view: &View, name: &str, args: &Value) -> Result<Outcome> 
                     } else {
                         re.replace_all(&text, regex::NoExpand(replacement))
                     };
-                    store.write(&rel, &new, None)?;
+                    let summary = format!("Replaced “{}” with “{}” across notes", short(pat), short(replacement));
+                    store.write(&rel, &new, None, Change::new(Author::Assistant, &summary))?;
                     changed.push(rel);
                 }
             }
@@ -479,6 +534,67 @@ fn notes_under(store: &Store, scope: Option<&str>) -> Result<Vec<(String, String
     }
     out.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(out)
+}
+
+/// What a find-and-replace actually changed, in words: "Replaced “delayed” with “late”" rather
+/// than quoting the whole line the assistant matched on.
+pub fn describe_replace(find: &str, replace: &str) -> String {
+    // Words, spaces and punctuation as separate tokens (Devanagari included).
+    static TOKEN: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    let re = TOKEN.get_or_init(|| Regex::new(r"\s+|[\p{L}\p{N}\p{M}_]+|[^\s\p{L}\p{N}\p{M}_]").unwrap());
+    let a: Vec<&str> = re.find_iter(find).map(|m| m.as_str()).collect();
+    let b: Vec<&str> = re.find_iter(replace).map(|m| m.as_str()).collect();
+    let (mut removed, mut added) = (String::new(), String::new());
+    for op in similar::capture_diff_slices(similar::Algorithm::Myers, &a, &b) {
+        match op {
+            similar::DiffOp::Delete { old_index, old_len, .. } => removed.push_str(&a[old_index..old_index + old_len].concat()),
+            similar::DiffOp::Insert { new_index, new_len, .. } => added.push_str(&b[new_index..new_index + new_len].concat()),
+            similar::DiffOp::Replace {
+                old_index,
+                old_len,
+                new_index,
+                new_len,
+            } => {
+                removed.push_str(&a[old_index..old_index + old_len].concat());
+                added.push_str(&b[new_index..new_index + new_len].concat());
+            }
+            similar::DiffOp::Equal { .. } => {
+                // Separate distant changes so they don't run together.
+                if !removed.is_empty() && !removed.ends_with(" … ") {
+                    removed.push_str(" … ");
+                }
+                if !added.is_empty() && !added.ends_with(" … ") {
+                    added.push_str(" … ");
+                }
+            }
+        }
+    }
+    let clean = |s: &str| {
+        short(
+            s.trim()
+                .trim_end_matches('…')
+                .trim()
+                .trim_matches(|c: char| "*_`#".contains(c))
+                .trim(),
+        )
+    };
+    let (removed, added) = (clean(&removed), clean(&added));
+    match (removed.is_empty(), added.is_empty()) {
+        (false, false) => format!("Replaced “{removed}” with “{added}”"),
+        (true, false) => format!("Added “{added}”"),
+        (false, true) => format!("Removed “{removed}”"),
+        (true, true) => "Edited".to_string(),
+    }
+}
+
+/// A short quote of `text` for version summaries.
+fn short(text: &str) -> String {
+    let one: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one.chars().count() > 40 {
+        format!("{}…", one.chars().take(39).collect::<String>())
+    } else {
+        one
+    }
 }
 
 fn clip(mut s: String) -> String {
@@ -687,6 +803,7 @@ pub fn run_command(root: &Path, line: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::history::Author;
 
     fn setup() -> (tempfile::TempDir, Store) {
         let dir = tempfile::tempdir().unwrap();
@@ -696,9 +813,11 @@ mod tests {
             &sales,
             "Monday",
             "[10:00:01] Pune sales were 4.5 lakh.\n[10:00:09] नाशिक delayed.\n",
+            Author::You,
         )
         .unwrap();
-        s.create_note(&sales, "Tuesday", "[11:00:00] pune target missed\n").unwrap();
+        s.create_note(&sales, "Tuesday", "[11:00:00] pune target missed\n", Author::You)
+            .unwrap();
         (dir, s)
     }
 
@@ -795,6 +914,51 @@ mod tests {
         assert!(call(&s, "rename_item", json!({ "path": "Sales/Nashik", "new_name": "Nashik office" })).ok);
         assert!(call(&s, "delete_item", json!({ "path": "Sales/Nashik office" })).ok);
         assert!(!s.resolve("Sales/Nashik office").unwrap().exists());
+    }
+
+    #[test]
+    fn every_assistant_edit_is_a_version_and_can_be_undone() {
+        let (_d, s) = setup();
+        let original = s.read("Sales/Monday.md").unwrap().content;
+        // A one-word change.
+        assert!(
+            call(
+                &s,
+                "edit_note",
+                json!({ "path": "Sales/Monday.md", "find": "delayed", "replace": "late" })
+            )
+            .ok
+        );
+        assert!(call(&s, "append_to_note", json!({ "path": "Sales/Monday.md", "text": "## Summary" })).ok);
+        let versions = s.versions("Sales/Monday.md").unwrap();
+        assert_eq!(versions.len(), 3, "created, the edit and the append are each kept");
+        assert_eq!(versions[1].summary, "Replaced “delayed” with “late”");
+        assert_eq!((versions[1].added, versions[1].removed), (1, 1));
+
+        let listed = call(&s, "list_versions", json!({ "path": "Sales/Monday.md" }));
+        assert_eq!(listed.response["output"]["total"], 3);
+        let first = versions.last().unwrap().id.clone();
+        let restored = call(&s, "restore_version", json!({ "path": "Sales/Monday.md", "version_id": first }));
+        assert!(restored.ok, "{:?}", restored.response);
+        assert_eq!(s.read("Sales/Monday.md").unwrap().content, original);
+        assert_eq!(
+            s.versions("Sales/Monday.md").unwrap().len(),
+            4,
+            "the restore is a version too; nothing is lost"
+        );
+    }
+
+    #[test]
+    fn describes_what_actually_changed() {
+        assert_eq!(
+            describe_replace(
+                "- **Nashik Supplier:** Delivery delayed; stock",
+                "- **Nashik Supplier:** Delivery late; stock"
+            ),
+            "Replaced “delayed” with “late”"
+        );
+        assert_eq!(describe_replace("Rahul", "Rahul Patil"), "Added “Patil”");
+        assert_eq!(describe_replace("very very good", "very good"), "Removed “very”");
     }
 
     #[test]

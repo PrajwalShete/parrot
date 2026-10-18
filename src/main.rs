@@ -1,6 +1,7 @@
 mod commands;
 mod config;
 mod gemini;
+mod history;
 mod platform;
 mod screen;
 mod serve;

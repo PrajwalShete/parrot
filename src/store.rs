@@ -4,8 +4,10 @@
 //!
 //! Every path from outside (the browser, the assistant) is relative to the data folder and goes
 //! through [`Store::resolve`], which refuses anything that would leave it. Deleting moves things to
-//! `.trash` so they can be restored.
+//! `.trash` so they can be restored. Every change to a note is kept as a version (see
+//! [`crate::history`]), and versions follow notes through renames, moves, deletes and restores.
 
+use crate::history::{Author, Change, History, Version};
 use anyhow::{Context, Result};
 use serde::Serialize;
 use std::fmt;
@@ -80,6 +82,7 @@ pub struct TrashEntry {
 
 pub struct Store {
     root: PathBuf,
+    history: History,
     /// Serializes writes from the browser, the transcriber and the assistant.
     lock: Mutex<()>,
 }
@@ -89,6 +92,7 @@ impl Store {
         std::fs::create_dir_all(root).with_context(|| format!("creating {}", root.display()))?;
         let root = root.canonicalize().with_context(|| format!("opening {}", root.display()))?;
         Ok(Self {
+            history: History::new(&root),
             root,
             lock: Mutex::new(()),
         })
@@ -250,18 +254,22 @@ impl Store {
     }
 
     /// Creates `title.md` in `parent` (a free name: "Standup 2.md" if taken) holding `content`.
-    pub fn create_note(&self, parent: &str, title: &str, content: &str) -> Result<String> {
+    /// Its first version is recorded as made by `author`.
+    pub fn create_note(&self, parent: &str, title: &str, content: &str, author: Author) -> Result<String> {
         let _g = self.guard();
         let dir = self.topic(parent)?;
         let title = clean_name(strip_ext(title))?;
         let path = unique(&dir, &title, Some("md"));
         write_atomic(&path, content)?;
-        Ok(self.rel(&path))
+        let rel = self.rel(&path);
+        self.history.record(&rel, None, content, Change::new(author, "Created"))?;
+        Ok(rel)
     }
 
-    /// Replaces a note. With `expected` (the `modified` the editor loaded), refuses if the file
-    /// changed since, so a browser tab never silently overwrites the assistant or a recording.
-    pub fn write(&self, rel: &str, content: &str, expected: Option<i64>) -> Result<Doc> {
+    /// Replaces a note and keeps the change as a version. With `expected` (the `modified` the
+    /// editor loaded), refuses if the file changed since, so a browser tab never silently
+    /// overwrites the assistant or a recording.
+    pub fn write(&self, rel: &str, content: &str, expected: Option<i64>, change: Change) -> Result<Doc> {
         let _g = self.guard();
         let path = self.resolve(rel)?;
         if path.exists() && !is_note(&path) {
@@ -279,7 +287,9 @@ impl Store {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        let before = std::fs::read_to_string(&path).ok();
         write_atomic(&path, content)?;
+        self.history.record(&self.rel(&path), before.as_deref(), content, change)?;
         Ok(Doc {
             path: self.rel(&path),
             name: display_name(&path),
@@ -288,6 +298,8 @@ impl Store {
         })
     }
 
+    /// Appends without keeping a version (a recording adds a line per sentence); call
+    /// [`Store::checkpoint`] when the recording ends.
     pub fn append(&self, rel: &str, text: &str) -> Result<i64> {
         use std::io::Write;
         let _g = self.guard();
@@ -296,6 +308,51 @@ impl Store {
         f.write_all(text.as_bytes())?;
         f.sync_data().ok();
         Ok(modified(&path))
+    }
+
+    /// Keeps the note's current text as a version (if it changed since the last one).
+    pub fn checkpoint(&self, rel: &str, change: Change) -> Result<Option<Version>> {
+        let _g = self.guard();
+        let path = self.note(rel)?;
+        let text = std::fs::read_to_string(&path)?;
+        self.history.record(&self.rel(&path), None, &text, change)
+    }
+
+    /// Before something appends to a note (a recording): keep its current text as a version if
+    /// history doesn't have it yet.
+    pub fn baseline(&self, rel: &str) -> Result<Option<Version>> {
+        let fresh = self.versions(rel)?.is_empty();
+        let change = if fresh {
+            Change::new(Author::Original, "Before Parrot kept versions")
+        } else {
+            Change::new(Author::External, "Changed outside Parrot")
+        };
+        self.checkpoint(rel, change)
+    }
+
+    /// A note's versions, newest first.
+    pub fn versions(&self, rel: &str) -> Result<Vec<Version>> {
+        let path = self.note(rel)?;
+        self.history.list(&self.rel(&path))
+    }
+
+    /// One version of a note: its details and full text.
+    pub fn version(&self, rel: &str, id: &str) -> Result<(Version, String)> {
+        let path = self.note(rel)?;
+        self.history
+            .get(&self.rel(&path), id)
+            .map_err(|e| StoreError::NotFound(format!("{e:#}")).into())
+    }
+
+    /// Makes an earlier version the current text. Nothing is lost: the restore is a new version.
+    pub fn restore_version(&self, rel: &str, id: &str, author: Author) -> Result<Doc> {
+        let (v, text) = self.version(rel, id)?;
+        let when = chrono::DateTime::from_timestamp_millis(v.created)
+            .map(|t| t.with_timezone(&chrono::Local).format("%-d %b, %-I:%M %p").to_string())
+            .unwrap_or_default();
+        let summary = format!("Restored the version from {when}");
+        let change = Change::new(author, &summary);
+        self.write(rel, &text, None, change)
     }
 
     /// Renames a topic or note in place. Notes keep their extension.
@@ -325,7 +382,9 @@ impl Store {
             return Err(StoreError::Conflict(format!("{} already exists", self.rel(&target))).into());
         }
         std::fs::rename(&path, &target)?;
-        Ok(self.rel(&target))
+        let (from, to) = (self.rel(&path), self.rel(&target));
+        self.history.moved(&from, &to)?;
+        Ok(to)
     }
 
     /// Moves a topic or note into another topic (`""` = top level).
@@ -350,7 +409,9 @@ impl Store {
         };
         let target = unique(&dest, &stem, ext.as_deref());
         std::fs::rename(&path, &target)?;
-        Ok(self.rel(&target))
+        let (from, to) = (self.rel(&path), self.rel(&target));
+        self.history.moved(&from, &to)?;
+        Ok(to)
     }
 
     /// Moves a topic or note to `.trash` and returns how to restore it.
@@ -367,6 +428,8 @@ impl Store {
         std::fs::write(slot.join(".origin"), &original)?;
         let name = path.file_name().context("no name")?;
         std::fs::rename(&path, slot.join(name))?;
+        // The history goes to the trash too, and comes back on restore.
+        self.history.take(&original, &slot.join(crate::history::DIR))?;
         Ok(TrashEntry { id, path: original })
     }
 
@@ -380,7 +443,7 @@ impl Store {
         let original = std::fs::read_to_string(slot.join(".origin")).map_err(|_| not_found(id))?;
         let item = std::fs::read_dir(&slot)?
             .filter_map(|e| e.ok())
-            .find(|e| e.file_name() != ".origin")
+            .find(|e| !e.file_name().to_string_lossy().starts_with('.'))
             .ok_or_else(|| not_found(id))?
             .path();
         let wanted = self.resolve(&original)?;
@@ -397,8 +460,10 @@ impl Store {
             wanted
         };
         std::fs::rename(&item, &target)?;
+        let rel = self.rel(&target);
+        self.history.put(&rel, &slot.join(crate::history::DIR))?;
         let _ = std::fs::remove_dir_all(&slot);
-        Ok(self.rel(&target))
+        Ok(rel)
     }
 }
 
@@ -491,6 +556,7 @@ fn now_millis() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::history::{Author, Change};
 
     fn store() -> (tempfile::TempDir, Store) {
         let dir = tempfile::tempdir().unwrap();
@@ -528,10 +594,10 @@ mod tests {
         let sales = s.create_topic("", "Sales").unwrap();
         let pune = s.create_topic(&sales, "Pune").unwrap();
         assert_eq!(pune, "Sales/Pune");
-        let note = s.create_note(&pune, "Daily standup", "# hi\n").unwrap();
+        let note = s.create_note(&pune, "Daily standup", "# hi\n", Author::You).unwrap();
         assert_eq!(note, "Sales/Pune/Daily standup.md");
         assert_eq!(
-            s.create_note(&pune, "Daily standup.md", "").unwrap(),
+            s.create_note(&pune, "Daily standup.md", "", Author::You).unwrap(),
             "Sales/Pune/Daily standup 2.md"
         );
         s.create_topic("", "accounts").unwrap();
@@ -547,17 +613,22 @@ mod tests {
     #[test]
     fn write_detects_conflicts() {
         let (_d, s) = store();
-        let note = s.create_note("", "n", "a").unwrap();
+        let note = s.create_note("", "n", "a", Author::You).unwrap();
         let doc = s.read(&note).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(20));
         s.append(&note, "b").unwrap();
-        let err = s.write(&note, "c", Some(doc.modified - 1)).unwrap_err();
+        let err = s
+            .write(&note, "c", Some(doc.modified - 1), Change::new(Author::You, "test"))
+            .unwrap_err();
         assert!(matches!(kind(err), StoreError::Conflict(_)));
         let fresh = s.read(&note).unwrap();
         assert_eq!(fresh.content, "ab");
-        s.write(&note, "c", Some(fresh.modified)).unwrap();
+        s.write(&note, "c", Some(fresh.modified), Change::new(Author::You, "test")).unwrap();
         assert_eq!(s.read(&note).unwrap().content, "c");
-        assert!(s.write("Sales.json", "{}", None).is_err(), "only notes can be written");
+        assert!(
+            s.write("Sales.json", "{}", None, Change::new(Author::You, "test")).is_err(),
+            "only notes can be written"
+        );
     }
 
     #[test]
@@ -565,7 +636,7 @@ mod tests {
         let (_d, s) = store();
         let a = s.create_topic("", "A").unwrap();
         let b = s.create_topic("", "B").unwrap();
-        let note = s.create_note(&a, "Plan", "x").unwrap();
+        let note = s.create_note(&a, "Plan", "x", Author::You).unwrap();
 
         let renamed = s.rename(&note, "Roadmap").unwrap();
         assert_eq!(renamed, "A/Roadmap.md");
@@ -578,6 +649,52 @@ mod tests {
         assert_eq!(s.tree().unwrap().len(), 1, ".trash is hidden");
         assert_eq!(s.restore(&trashed.id).unwrap(), "B");
         assert_eq!(s.read(&moved).unwrap().content, "x");
+    }
+
+    #[test]
+    fn history_survives_rename_move_delete_and_restore() {
+        let (_d, s) = store();
+        let a = s.create_topic("", "A").unwrap();
+        s.create_topic("", "B").unwrap();
+        let note = s.create_note(&a, "Plan", "v1", Author::You).unwrap();
+        s.write(&note, "v2", None, Change::new(Author::Assistant, "edit")).unwrap();
+        assert_eq!(s.versions(&note).unwrap().len(), 2);
+
+        let renamed = s.rename(&note, "Roadmap").unwrap();
+        assert_eq!(s.versions(&renamed).unwrap().len(), 2, "history follows a rename");
+        s.rename("A", "Alpha").unwrap();
+        assert_eq!(s.versions("Alpha/Roadmap.md").unwrap().len(), 2, "and a topic rename");
+        let moved = s.move_to("Alpha/Roadmap.md", "B").unwrap();
+        assert_eq!(s.versions(&moved).unwrap().len(), 2, "and a move");
+
+        let trashed = s.delete(&moved).unwrap();
+        assert!(
+            !s.root().join(".history/B/Roadmap.md").exists(),
+            "history goes to the trash with the note"
+        );
+        let back = s.restore(&trashed.id).unwrap();
+        assert_eq!(s.versions(&back).unwrap().len(), 2, "and comes back with it");
+
+        let first = s.versions(&back).unwrap().last().unwrap().id.clone();
+        s.restore_version(&back, &first, Author::Restore).unwrap();
+        assert_eq!(s.read(&back).unwrap().content, "v1");
+        assert!(s.tree().unwrap().iter().all(|n| !n.name.starts_with('.')), "history stays hidden");
+    }
+
+    #[test]
+    fn recordings_checkpoint_once() {
+        let (_d, s) = store();
+        let note = s.create_note("", "Meeting", "---\ntype: transcript\n---\n\n", Author::You).unwrap();
+        s.baseline(&note).unwrap();
+        s.append(&note, "[10:00:00] one\n").unwrap();
+        s.append(&note, "[10:00:05] two\n").unwrap();
+        assert_eq!(s.versions(&note).unwrap().len(), 1, "appends alone don't make versions");
+        let v = s
+            .checkpoint(&note, Change::new(Author::Recording, "Recorded 2 lines"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(v.added, 2);
+        assert_eq!(s.versions(&note).unwrap().len(), 2);
     }
 
     #[test]

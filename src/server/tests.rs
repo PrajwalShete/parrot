@@ -163,3 +163,45 @@ fn host_and_origin_rules() {
     assert!(!allowed_origin("http://localhost:4747.evil.com", 4747));
     assert!(!allowed_origin("null", 4747));
 }
+
+#[tokio::test]
+async fn versions_api() {
+    let (_d, app, _) = app();
+    let (_, v) = call(
+        &app,
+        req("POST", "/api/notes", Some(json!({ "title": "Plan", "content": "first" }))),
+    )
+    .await;
+    let path = v["path"].as_str().unwrap().to_string();
+    let (_, doc) = call(&app, req("GET", "/api/note?path=Plan.md", None)).await;
+    call(
+        &app,
+        req(
+            "PUT",
+            "/api/note",
+            Some(json!({ "path": path, "content": "second", "expected_modified": doc["modified"] })),
+        ),
+    )
+    .await;
+
+    let (s, v) = call(&app, req("GET", "/api/versions?path=Plan.md", None)).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let versions = v["versions"].as_array().unwrap();
+    assert_eq!(versions.len(), 2);
+    assert_eq!(versions[0]["author"], "you");
+    let first = versions[1]["id"].as_str().unwrap().to_string();
+
+    let (_, one) = call(&app, req("GET", &format!("/api/version?path=Plan.md&id={first}"), None)).await;
+    assert_eq!(one["content"], "first");
+    let (s, restored) = call(
+        &app,
+        req("POST", "/api/versions/restore", Some(json!({ "path": "Plan.md", "id": first }))),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(restored["content"], "first");
+    let (_, v) = call(&app, req("GET", "/api/versions?path=Plan.md", None)).await;
+    assert_eq!(v["versions"][0]["author"], "restore");
+    let (s, _) = call(&app, req("GET", "/api/version?path=Plan.md&id=../../x", None)).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+}

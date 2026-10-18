@@ -10,6 +10,7 @@
 
 use super::Shared;
 use crate::gemini;
+use crate::history::{Author, Change};
 use anyhow::{Result, bail};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
@@ -78,10 +79,23 @@ async fn run(socket: WebSocket, state: Shared, path: String) {
     });
 
     state.log(format!("● Recording into {path}"));
+    // Keep what the note held before this recording (also catches edits made outside Parrot).
+    let _ = state.store.baseline(&path);
+    let lines_before = state.store.read(&path).map(|d| d.content.lines().count()).unwrap_or(0);
     let langs = state.config.read().unwrap().language_codes.clone();
     let result = sessions(&state, &key, &path, &langs, audio_rx, quit_rx, &out_tx).await;
     if let Err(e) = result {
         let _ = out_tx.send(json!({ "type": "error", "message": format!("{e:#}") }));
+    }
+    // One version per recording, not one per sentence.
+    let added = state
+        .store
+        .read(&path)
+        .map(|d| d.content.lines().count().saturating_sub(lines_before))
+        .unwrap_or(0);
+    if added > 0 {
+        let summary = format!("Recorded {added} line{}", if added == 1 { "" } else { "s" });
+        let _ = state.store.checkpoint(&path, Change::new(Author::Recording, &summary));
     }
     let _ = out_tx.send(json!({ "type": "stopped" }));
     state.log(format!("■ Stopped recording {path}"));

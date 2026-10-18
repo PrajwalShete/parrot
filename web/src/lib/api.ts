@@ -31,6 +31,18 @@ export interface AppState {
   keys_url: string;
 }
 
+export type Author = "original" | "you" | "assistant" | "recording" | "restore" | "external";
+
+export interface Version {
+  id: string;
+  created: number;
+  author: Author;
+  summary: string;
+  added: number;
+  removed: number;
+  size: number;
+}
+
 export class ApiError extends Error {
   constructor(
     message: string,
@@ -80,6 +92,10 @@ export const api = {
   remove: (path: string) => request<{ id: string; path: string }>("POST", "/api/delete", { path }),
   restore: (id: string) => request<{ path: string }>("POST", "/api/restore", { id }).then((r) => r.path),
   reveal: (path = "") => request<{ ok: boolean }>("POST", "/api/reveal", { path }),
+  versions: (path: string) => request<{ versions: Version[] }>("GET", `/api/versions?path=${q(path)}`).then((r) => r.versions),
+  version: (path: string, id: string) =>
+    request<{ version: Version; content: string }>("GET", `/api/version?path=${q(path)}&id=${encodeURIComponent(id)}`),
+  restoreVersion: (path: string, id: string) => request<Doc>("POST", "/api/versions/restore", { path, id }),
 };
 
 /// A WebSocket URL on this origin.

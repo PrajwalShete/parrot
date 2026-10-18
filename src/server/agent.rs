@@ -291,6 +291,7 @@ async fn run_tool(state: &Shared, call: &Value, out: &mpsc::UnboundedSender<Out>
         "type": "tool", "id": id, "name": name,
         "status": if outcome.ok { "done" } else { "error" },
         "summary": outcome.summary,
+        "paths": outcome.changed,
     })));
     if !outcome.changed.is_empty() {
         let _ = out.send(Out::Json(json!({ "type": "changed", "paths": outcome.changed })));

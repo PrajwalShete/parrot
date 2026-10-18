@@ -6,7 +6,7 @@ export type AssistantState = "idle" | "connecting" | "live" | "ending";
 
 export type Item =
   | { id: number; role: "user" | "agent"; text: string; done: boolean; typed?: boolean }
-  | { id: number; role: "tool"; key: string; name: string; summary: string; status: "running" | "done" | "error" };
+  | { id: number; role: "tool"; key: string; name: string; summary: string; status: "running" | "done" | "error"; paths?: string[] };
 
 export interface View {
   note: string | null;
@@ -143,7 +143,7 @@ export function useAssistant(view: View, onChanged: (paths: string[]) => void): 
             const existing = l.find((i) => i.role === "tool" && i.key === key);
             const summary = msg.summary ?? labelFor(msg.name ?? "");
             if (existing) {
-              return l.map((i) => (i === existing ? { ...i, status: msg.status ?? "done", summary } : i));
+              return l.map((i) => (i === existing ? { ...i, status: msg.status ?? "done", summary, paths: msg.paths } : i));
             }
             const closed = l.map((i) => (i.role !== "tool" && !i.done ? { ...i, done: true } : i));
             return [...closed, { id: nextId++, role: "tool", key, name: msg.name ?? "", summary, status: msg.status ?? "running" }];

@@ -160,6 +160,7 @@ fn seed(store: &Store) -> Result<()> {
          - “What did we decide about the Pune stock today?”\n\
          - “Add a summary with action items to this meeting.”\n\
          - “Find every meeting where the IoT cost came up.”\n",
+        crate::history::Author::Original,
     )?;
     Ok(())
 }

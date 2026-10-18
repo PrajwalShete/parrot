@@ -222,7 +222,7 @@ function TitleField({ name, onRename }: { name: string; onRename: (name: string)
   );
 }
 
-function Body({ body, empty, onEdit }: { body: string; empty: string; onEdit: () => void }) {
+export function Body({ body, empty, onEdit }: { body: string; empty: string; onEdit: () => void }) {
   const parts = useMemo(() => blocks(body), [body]);
   if (parts.length === 0) {
     return (

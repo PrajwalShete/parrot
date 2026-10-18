@@ -1,6 +1,6 @@
 [package]
 name = "parrot"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "MIT"
 description = "Live meeting transcription and a voice assistant for your notes, in your browser."
@@ -26,6 +26,7 @@ rust-embed = { version = "8.13.0", features = ["include-exclude"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+similar = "3.2.0"
 tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros", "time", "sync", "signal", "fs", "io-util", "process", "net"] }
 tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
 ureq = { version = "3.4.2", features = ["json"] }

@@ -3,6 +3,7 @@
 use super::{Event, Shared};
 use crate::config;
 use crate::gemini::{self, KeyCheck};
+use crate::history::{Author, Change};
 use crate::store::StoreError;
 use axum::Json;
 use axum::extract::{Query, State};
@@ -128,7 +129,34 @@ pub struct WriteNote {
 }
 
 pub async fn write_note(State(s): State<Shared>, Json(b): Json<WriteNote>) -> ApiResult {
-    let doc = s.store.write(&b.path, &b.content, b.expected_modified)?;
+    let doc = s
+        .store
+        .write(&b.path, &b.content, b.expected_modified, Change::new(Author::You, "Edited"))?;
+    Ok(Json(serde_json::to_value(doc).unwrap()))
+}
+
+/// A note's versions, newest first.
+pub async fn versions(State(s): State<Shared>, Query(q): Query<PathQuery>) -> ApiResult {
+    let versions = s.store.versions(&q.path)?;
+    Ok(Json(json!({ "versions": versions })))
+}
+
+#[derive(Deserialize)]
+pub struct VersionQuery {
+    path: String,
+    id: String,
+}
+
+/// One version's details and full text.
+pub async fn version(State(s): State<Shared>, Query(q): Query<VersionQuery>) -> ApiResult {
+    let (version, content) = s.store.version(&q.path, &q.id)?;
+    Ok(Json(json!({ "version": version, "content": content })))
+}
+
+/// Makes an earlier version current (as a new version, so nothing is lost).
+pub async fn restore_version(State(s): State<Shared>, Json(b): Json<VersionQuery>) -> ApiResult {
+    let doc = s.store.restore_version(&b.path, &b.id, Author::Restore)?;
+    s.log(format!("Restored an earlier version of {}", doc.path));
     Ok(Json(serde_json::to_value(doc).unwrap()))
 }
 
@@ -149,7 +177,7 @@ pub async fn create_note(State(s): State<Shared>, Json(b): Json<CreateNote>) -> 
         (None, Some("transcript")) => transcript_header(),
         (None, _) => String::new(),
     };
-    let path = s.store.create_note(&b.parent, &b.title, &content)?;
+    let path = s.store.create_note(&b.parent, &b.title, &content, Author::You)?;
     s.log(format!("Created {path}"));
     Ok(Json(json!({ "path": path })))
 }

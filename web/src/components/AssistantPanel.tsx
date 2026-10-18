@@ -57,12 +57,20 @@ function Orb({ assistant }: { assistant: Assistant }) {
   );
 }
 
-function FeedItem({ item }: { item: Item }) {
+function FeedItem({ item, onReview }: { item: Item; onReview: (path: string) => void }) {
   if (item.role === "tool") {
+    // Notes this step changed (topics and moves aside): offer to review the change.
+    const notes = (item.paths ?? []).filter((p) => /\.(md|txt)$/.test(p));
+    const review = item.status === "done" && notes.length > 0 && !["move_item", "rename_item", "delete_item"].includes(item.name) ? notes[notes.length - 1] : undefined;
     return (
       <div className={`feed-tool is-${item.status}`}>
         <span className="feed-tool-icon">{item.status === "running" ? <Spinner size={11} /> : item.status === "done" ? <Check size={12} strokeWidth={2.5} /> : <X size={12} strokeWidth={2.5} />}</span>
         <span className="feed-tool-text">{item.summary}</span>
+        {review && (
+          <button type="button" className="feed-review" onClick={() => onReview(review)}>
+            Review
+          </button>
+        )}
       </div>
     );
   }
@@ -74,7 +82,19 @@ function FeedItem({ item }: { item: Item }) {
   );
 }
 
-export function AssistantPanel({ assistant, onClose, hasKey, onSettings }: { assistant: Assistant; onClose: () => void; hasKey: boolean; onSettings: () => void }) {
+export function AssistantPanel({
+  assistant,
+  onClose,
+  hasKey,
+  onSettings,
+  onReview,
+}: {
+  assistant: Assistant;
+  onClose: () => void;
+  hasKey: boolean;
+  onSettings: () => void;
+  onReview: (path: string) => void;
+}) {
   const { state, items } = assistant;
   const [text, setText] = useState("");
   const [queued, setQueued] = useState<string | null>(null);
@@ -126,7 +146,7 @@ export function AssistantPanel({ assistant, onClose, hasKey, onSettings }: { ass
       <div className="feed" ref={feed} aria-live="polite">
         {items.length === 0 ? (
           <div className="feed-empty">
-            <p>Ask about any meeting, in Marathi, Hindi or English. Parrot reads your notes, and can add summaries, fix names or tidy up topics.</p>
+            <p>Ask about any meeting, in Marathi, Hindi or English. Parrot reads your notes, and can add summaries, fix names or tidy up topics. Every change it makes is saved as a version you can review and undo.</p>
             <div className="suggestions">
               {SUGGESTIONS.map((s) => (
                 <button key={s} type="button" className="suggestion" disabled={!hasKey || busy} onClick={() => ask(s)}>
@@ -136,7 +156,7 @@ export function AssistantPanel({ assistant, onClose, hasKey, onSettings }: { ass
             </div>
           </div>
         ) : (
-          items.map((item) => <FeedItem key={item.id} item={item} />)
+          items.map((item) => <FeedItem key={item.id} item={item} onReview={onReview} />)
         )}
       </div>
 

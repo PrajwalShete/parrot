@@ -1,7 +1,8 @@
-import { AudioLines, ChevronRight, FilePlus2, FileText, FolderInput, FolderOpen, FolderPlus, Mic, MoreHorizontal, PanelLeftOpen, Pencil, Settings, Trash2 } from "lucide-react";
+import { AudioLines, ChevronRight, FilePlus2, History, FileText, FolderInput, FolderOpen, FolderPlus, Mic, MoreHorizontal, PanelLeftOpen, Pencil, Settings, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AssistantPanel } from "./components/AssistantPanel";
 import { type Command, CommandPalette } from "./components/CommandPalette";
+import { HistoryView } from "./components/HistoryView";
 import { useFeedback } from "./components/feedback";
 import { NoteView } from "./components/NoteView";
 import { Home, TopicView } from "./components/Pages";
@@ -78,6 +79,7 @@ export default function App() {
   const [palette, setPalette] = useState(false);
   const [settings, setSettings] = useState<{ open: boolean; focusKey: boolean }>({ open: false, focusKey: false });
   const [editing, setEditing] = useState(false);
+  const [history, setHistory] = useState(false);
   const [menu, setMenu] = useState<{ at: { x: number; y: number }; items: MenuEntry[] } | null>(null);
   const [theme, setTheme] = useState<Theme>(() => load("theme", "system"));
   const recorder = useRecorder();
@@ -137,6 +139,7 @@ export default function App() {
 
   const go = useCallback((r: Route) => {
     setEditing(false);
+    setHistory(false);
     if (location.hash !== hashFor(r)) location.hash = hashFor(r);
     setRoute(r);
     if (window.innerWidth <= NARROW) setSidebar(false);
@@ -431,8 +434,8 @@ export default function App() {
 
   // ---- Keyboard -------------------------------------------------------------------------------
 
-  const keys = useRef({ route, editing, current });
-  keys.current = { route, editing, current };
+  const keys = useRef({ route, editing, current, history });
+  keys.current = { route, editing, current, history };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const cmd = e.metaKey || e.ctrlKey;
@@ -447,9 +450,12 @@ export default function App() {
         setAssistantOpen((a) => !a);
       } else if (!cmd && !e.altKey && !isTyping(e.target) && document.querySelector("dialog[open]") === null) {
         const { route: r, editing: ed } = keys.current;
-        if (e.key === "e" && r.kind === "note" && !ed) {
+        if (e.key === "e" && r.kind === "note" && !ed && !keys.current.history) {
           e.preventDefault();
           setEditing(true);
+        } else if (e.key === "h" && r.kind === "note" && !ed) {
+          e.preventDefault();
+          setHistory((h) => !h);
         }
       }
     };
@@ -536,7 +542,10 @@ export default function App() {
             {offline && <span className="offline">Parrot isn't running · start it with `parrot`</span>}
             {route.kind === "note" && current && (
               <>
-                {!showingRecording && (
+                <Button size="sm" variant={history ? "primary" : "ghost"} onClick={() => setHistory((h) => !h)} title="Every saved version of this note (H)">
+                  <History size={14} strokeWidth={2} /> History
+                </Button>
+                {!showingRecording && !history && (
                   <Button size="sm" variant={editing ? "primary" : "ghost"} onClick={() => setEditing(!editing)}>
                     {editing ? "Done" : "Edit"}
                   </Button>
@@ -566,7 +575,16 @@ export default function App() {
         </header>
 
         <div className="content">
-          {route.kind === "note" ? (
+          {route.kind === "note" && history ? (
+            <HistoryView
+              key={route.path}
+              path={route.path}
+              name={current?.name ?? route.path}
+              version={noteVersion}
+              recording={showingRecording}
+              onClose={() => setHistory(false)}
+            />
+          ) : route.kind === "note" ? (
             <NoteView
               key={route.path}
               path={route.path}
@@ -602,7 +620,16 @@ export default function App() {
 
       {assistantOpen && (
         <>
-          <AssistantPanel assistant={assistant} onClose={() => setAssistantOpen(false)} hasKey={hasKey || !state} onSettings={needKey} />
+          <AssistantPanel
+            assistant={assistant}
+            onClose={() => setAssistantOpen(false)}
+            hasKey={hasKey || !state}
+            onSettings={needKey}
+            onReview={(path) => {
+              go({ kind: "note", path });
+              setHistory(true);
+            }}
+          />
           <div className="scrim scrim-right" onClick={() => setAssistantOpen(false)} aria-hidden />
         </>
       )}
