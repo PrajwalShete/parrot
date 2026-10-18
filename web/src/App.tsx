@@ -285,8 +285,22 @@ export default function App() {
     [route, go],
   );
 
+  /** A recording writes to its note by path, so that note and its topics must stay put meanwhile. */
+  const busy = useCallback(
+    (path: string) => {
+      const rec = recorder.state !== "idle" ? recorder.path : null;
+      if (rec && (rec === path || rec.startsWith(path + "/"))) {
+        fb.toast("That's being recorded into. Stop the recording first.");
+        return true;
+      }
+      return false;
+    },
+    [recorder.state, recorder.path, fb],
+  );
+
   const renamePath = useCallback(
     async (path: string, name: string) => {
+      if (busy(path)) throw new Error("recording");
       try {
         const to = await api.rename(path, name);
         await refreshTree();
@@ -296,7 +310,7 @@ export default function App() {
         throw e;
       }
     },
-    [refreshTree, follow, fail],
+    [busy, refreshTree, follow, fail],
   );
 
   const rename = useCallback(
@@ -309,6 +323,7 @@ export default function App() {
 
   const moveTo = useCallback(
     async (from: string, to: string) => {
+      if (busy(from)) return;
       try {
         const dest = await api.move(from, to);
         await refreshTree();
@@ -319,7 +334,7 @@ export default function App() {
         fail(e);
       }
     },
-    [refreshTree, toggle, follow, fb, fail],
+    [busy, refreshTree, toggle, follow, fb, fail],
   );
 
   const move = useCallback(
@@ -332,9 +347,7 @@ export default function App() {
 
   const remove = useCallback(
     async (node: TreeNode) => {
-      if (recorder.path && (recorder.path === node.path || recorder.path.startsWith(node.path + "/"))) {
-        return fb.toast("That's being recorded into. Stop the recording first.");
-      }
+      if (busy(node.path)) return;
       const ok = await fb.confirm({
         title: `Delete ${node.kind === "topic" ? "topic" : "note"}?`,
         body: node.kind === "topic" ? <>“{node.name}” and everything inside it will be moved to the trash.</> : <>“{node.name}” will be moved to the trash.</>,
@@ -363,7 +376,7 @@ export default function App() {
         fail(e);
       }
     },
-    [recorder.path, fb, refreshTree, route, go, fail],
+    [busy, fb, refreshTree, route, go, fail],
   );
 
   const revealIn = useCallback((path = "") => void api.reveal(path).catch(fail), [fail]);
